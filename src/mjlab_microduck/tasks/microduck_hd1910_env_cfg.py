@@ -45,6 +45,6 @@ def make_microduck_hd1910_velocity_env_cfg(
 MicroduckHD1910RlCfg = replace(
     deepcopy(MicroduckRlCfg),
     experiment_name="microduck_hd1910_velocity",
-    run_name="hd1910_m6_luwu",
+    run_name="hd1910_m6_hxg",
     logger="tensorboard",
 )
