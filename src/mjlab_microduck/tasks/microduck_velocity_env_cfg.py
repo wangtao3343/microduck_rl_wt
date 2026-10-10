@@ -338,9 +338,54 @@ def make_microduck_velocity_env_cfg(
     cfg.rewards["body_ang_vel"].weight = -0.05
     cfg.rewards["angular_momentum"].weight = -0.02
 
-    # Velocity tracking rewards
+    # Velocity tracking rewards.
+    # `std` is the error you still care about: exp(-e^2/std^2) is 1.0 at e=0 but
+    # only 0.37 at e=std. Because it has ZERO GRADIENT at e=0, a std that is a
+    # large fraction of the command range makes "roughly right" the argmax — the
+    # policy stops tracking early and ignores small commands entirely.
+    # Measured 2026-10-10 with a 13-point command sweep on a converged policy
+    # (branch hd1910, model_5500, 4096 envs, 26 s per point):
+    #   std_lin = sqrt(0.1) = 0.316 vs vx range +-0.4 (79% of it!)
+    #     vx +0.10 -> 0.000 (dead), +0.20 -> 0.65, +0.40 -> 0.75, +0.50 -> 0.82,
+    #     vx -0.20 -> 0.000. Standing still at |cmd|<0.15 was worth
+    #     exp(-(0.15/0.316)^2) = 0.80 of the term, so not moving was nearly free;
+    #     and closing a 0.1 m/s residual at cmd 0.4 paid only
+    #     1 - exp(-(0.1/0.316)^2) = 0.095 of a weight-2.0 term.
+    #   std_ang = sqrt(0.5) = 0.707 vs wz range +-1.0 (71% of it)
+    #     wz +-0.50 -> 0.000 (dead), wz +1.00 -> 1.29, wz -1.00 -> 0.95.
+    #     Standing still is worth exp(-(0.5/0.707)^2)=0.61 at half stick but only
+    #     exp(-(1.0/0.707)^2)=0.14 at full stick — turning pays 2.2x more at full
+    #     scale, which is exactly the deadband the sweep shows.
+    # The same failure reproduces on the old 737 g XL330 run (err_vel_xy 0.375,
+    # err_vel_yaw ~1.24), so this is the shared recipe, not the HD-1910 model.
+    #
+    # A/B 2026-10-10 (resume model_5500 -> 6000, 500 iters, same 13-point sweep
+    # on the frozen ONNX of each): tightening LINEAR to 0.18 is a clear win —
+    # vx +0.20 0.65->0.88, +0.30 0.71->0.86, +0.40 0.75->0.86, +0.50 0.82->0.91
+    # of the commanded speed. Tightening ANGULAR to 0.30 BACKFIRED — wz +1.00
+    # went 1.29 -> 0.26, i.e. the policy nearly stopped turning.
+    # Why: track_angular_velocity scores z_error + xy_error, and xy_error is the
+    # UNCOMMANDED roll/pitch body rate. A 25 cm robot necessarily wobbles when it
+    # turns, so std 0.30 charges exp(-(0.3/0.3)^2)=0.37 for the very wobble the
+    # turn requires, and the cheapest escape is to not turn. This is AGENTS.md's
+    # "price only the escapable part" rule as a controlled experiment.
+    # The aggregate training metric lied the other way (error_vel_yaw 1.14->2.32,
+    # Episode_Reward/track_angular_velocity 0.758->0.044, mean reward 131->98) —
+    # trust the per-command sweep, not the aggregate.
+    # So: keep std_lin tight; leave std_ang loose, and if yaw still lags, price it
+    # with a bigger weight or an EMA-filtered error — never a tighter angular std.
+    # CONFIRMED 2026-10-10 (resume model_5500 -> 5999, 500 iters, run
+    # 2026-10-10_23-01-26_hd1910_fix_angstd): with 0.18 / sqrt(0.5) the sweep gives
+    #   vx +0.20/0.30/0.40/0.50 -> 0.81/0.86/0.88/0.89  (was 0.65/0.71/0.75/0.82)
+    #   wz +1.00 / -1.00        -> 1.25/1.03            (was 1.29/0.95)
+    # Both gains held at once — strictly better than either parent checkpoint.
+    # Still dead at |vx| <= 0.10 and |wz| <= 0.5. A std change cannot fix that:
+    # standing still at half stick still pays exp(-(0.5/0.707)^2) = 0.61, and at
+    # cmd 0.4 the residual 0.1 m/s already pays 0.095 of the term. Needs
+    # command-bucket sampling (cf. rel_turn_in_place_envs) or an EMA-filtered L1,
+    # not a tighter std.
     cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.1)
+    cfg.rewards["track_linear_velocity"].params["std"] = 0.18
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
